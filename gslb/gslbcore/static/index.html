@@ -147,7 +147,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             div.setAttribute('x-id', p.id);
 
             const h2 = document.createElement('h2');
-            h2.innerText = "📡"+p.id;
+            h2.innerText = "📍"+p.id;
             div.appendChild(h2);
 
             const extra = document.createElement('div');
@@ -174,7 +174,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             div.setAttribute('x-id', r.id);
 
             const h2 = document.createElement('h2');
-            h2.innerText = "📍"+r.id;
+            h2.innerText = "📡"+r.id;
             div.appendChild(h2);
 
             const extra = document.createElement('div');
@@ -277,7 +277,7 @@ async function visualizeLatencyToRegion(regionId) {
 
     for (const [popId, latency] of Object.entries(latency_map)) {
         const pop = popIdToPopup.get(popId);
-        pop.querySelector('.extra').innerText = `${latency.toFixed(2)}ms`;
+        pop.querySelector('.extra').innerText = `${latency.Latency.toFixed(2)}ms`;
     }
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/netip"
+	"sort"
 	"sync"
 	"time"
 
@@ -33,9 +34,23 @@ type Config struct {
 	MakeLatencyMeasurer MakeLatencyMeasurerFunc
 }
 
+func (c *Config) findPopById(id string) *types.PoPInfo {
+	for i := range c.Pops {
+		if c.Pops[i].Id == id {
+			return &c.Pops[i]
+		}
+	}
+	return nil
+}
+
+type PoPLatency struct {
+	Id      string
+	Latency float64 // in milliseconds
+}
+
 type RegionState struct {
 	info       types.RegionInfo
-	popLatency []float64
+	popLatency []PoPLatency
 }
 
 type GslbCore struct {
@@ -90,10 +105,12 @@ func New(cfg *Config) *GslbCore {
 	for i, r := range cfg.Regions {
 		c.latencyMeasurers[i] = mlm(r.ProberURL, cfg.ProberSecret)
 
-		popLatency := make([]float64, len(c.cfg.Pops))
+		popLatency := make([]PoPLatency, len(c.cfg.Pops))
 		for j := range popLatency {
-			// initialize to a large value
-			popLatency[j] = 10000000
+			popLatency[j] = PoPLatency{
+				Id:      c.cfg.Pops[j].Id,
+				Latency: 10000000, // initialize to a large value
+			}
 		}
 
 		c.regions[i] = &RegionState{
@@ -174,7 +191,7 @@ func (c *GslbCore) UpdateLatency(ctx context.Context) {
 	for i, lm := range c.latencyMeasurers {
 		slog.Info("Measuring latency from prober", slog.String("latencyMeasurer", lm.DebugString()))
 
-		popLatency := make([]float64, len(c.cfg.Pops))
+		popLatency := make([]PoPLatency, len(c.cfg.Pops))
 		for j := range popLatency {
 			lat, err := lm.MeasureLatency(ctx, c.cfg.Pops[j].LatencyEndpointUrl)
 			if err != nil {
@@ -183,8 +200,14 @@ func (c *GslbCore) UpdateLatency(ctx context.Context) {
 					slog.String("error", err.Error()))
 				lat = 20000000 // random long latancy
 			}
-			popLatency[j] = lat
+			popLatency[j] = PoPLatency{
+				Id:      c.cfg.Pops[j].Id,
+				Latency: lat, // in milliseconds
+			}
 		}
+		sort.Slice(popLatency, func(i, j int) bool {
+			return popLatency[i].Latency < popLatency[j].Latency
+		})
 
 		c.mu.Lock()
 		c.regions[i].popLatency = popLatency

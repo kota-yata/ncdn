@@ -100,7 +100,7 @@ func (c *GslbCore) spawnHTTPServer(ctx context.Context) error {
 		latencyMap := make(map[string]float64)
 		c.mu.Lock()
 		for i, r := range c.regions {
-			latencyMap[c.cfg.Regions[i].Id] = r.popLatency[popIdx]
+			latencyMap[c.cfg.Regions[i].Id] = r.popLatency[popIdx].Latency
 		}
 		c.mu.Unlock()
 
@@ -116,7 +116,7 @@ func (c *GslbCore) spawnHTTPServer(ctx context.Context) error {
 	mux.HandleFunc("/latency_to_region", func(w http.ResponseWriter, r *http.Request) {
 		regionId := r.URL.Query().Get("region_id")
 
-		var popLatency []float64
+		var popLatency []PoPLatency
 		c.mu.Lock()
 		for _, r := range c.regions {
 			if r.info.Id == regionId {
@@ -126,7 +126,7 @@ func (c *GslbCore) spawnHTTPServer(ctx context.Context) error {
 		}
 		c.mu.Unlock()
 
-		latencyMap := make(map[string]float64)
+		latencyMap := make(map[string]PoPLatency)
 		for i, pop := range c.cfg.Pops {
 			latencyMap[pop.Id] = popLatency[i]
 		}
