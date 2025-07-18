@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/netip"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -41,6 +42,18 @@ func (c *Config) findPopById(id string) *types.PoPInfo {
 		}
 	}
 	return nil
+}
+
+// extractRegionCode extracts the region code from popStatus ID
+// "pop-sgp.ncdn-do.nyaxtstep.com" -> "sgp"
+func extractRegionCode(popStatusId string) string {
+	// Match pattern: pop-{regioncode}.{rest}
+	re := regexp.MustCompile(`^pop-([a-zA-Z0-9]+)\.`)
+	matches := re.FindStringSubmatch(popStatusId)
+	if len(matches) >= 2 {
+		return matches[1]
+	}
+	return popStatusId
 }
 
 type PoPLatency struct {
@@ -141,7 +154,7 @@ func (c *GslbCore) Run(ctx context.Context) error {
 		// sleep for 30 seconds, or stop running if the context is done
 		select {
 		case <-time.After(30 * time.Second):
-			break
+			// Continue to next iteration
 
 		case <-ctx.Done():
 			err := ctx.Err()
@@ -198,11 +211,11 @@ func (c *GslbCore) UpdateLatency(ctx context.Context) {
 				slog.Error("Failed to measure latency",
 					slog.String("latencyMeasurer", lm.DebugString()),
 					slog.String("error", err.Error()))
-				lat = 20000000 // random long latancy
+				lat = 20000000
 			}
 			popLatency[j] = PoPLatency{
 				Id:      c.cfg.Pops[j].Id,
-				Latency: lat, // in milliseconds
+				Latency: lat,
 			}
 		}
 		sort.Slice(popLatency, func(i, j int) bool {
@@ -243,11 +256,52 @@ func (c *GslbCore) Query(srcIP netip.Addr) []netip.Addr {
 		for _, p := range r.info.Prefices {
 			slog.Info("Checking region", slog.String("regionId", r.info.Id), slog.String("prefix", p.String()))
 			if p.Contains(srcIP) {
-				slog.Info("Matched region", slog.String("regionId", r.info.Id))
-				minLatId := r.popLatency[0].Id
-				return []netip.Addr{c.cfg.findPopById(minLatId).Ip4}
+				bestPopId := c.selectBestPop(r.popLatency)
+				return []netip.Addr{c.cfg.findPopById(bestPopId).Ip4}
 			}
 		}
 	}
 	return []netip.Addr{c.cfg.Pops[0].Ip4}
+}
+
+func (c *GslbCore) selectBestPop(popLatency []PoPLatency) string {
+	if len(popLatency) == 0 {
+		return c.cfg.Pops[0].Id
+	}
+
+	bestPopId := popLatency[0].Id
+	bestScore := float64(1000000)
+
+	for _, pl := range popLatency {
+		var popStatus *types.PoPStatus
+		for _, ps := range c.popstate {
+			if ps != nil && ps.Error == "" {
+				regionCode := extractRegionCode(ps.Id)
+				if regionCode == pl.Id {
+					popStatus = ps
+					break
+				}
+			}
+		}
+
+		loadFactor := float64(100)
+		if popStatus != nil {
+			loadFactor = popStatus.Load * 10 // TODO: make it plausible
+		}
+
+		score := pl.Latency + loadFactor
+		slog.Info("PoP scoring",
+			slog.String("popId", pl.Id),
+			slog.Float64("latency", pl.Latency),
+			slog.Float64("load", loadFactor/10),
+			slog.Float64("score", score))
+
+		if score < bestScore {
+			bestScore = score
+			bestPopId = pl.Id
+		}
+	}
+
+	slog.Info("Selected best PoP", slog.String("popId", bestPopId), slog.Float64("score", bestScore))
+	return bestPopId
 }
