@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/yzp0n/ncdn/httprps"
 	"github.com/yzp0n/ncdn/types"
+
+	"github.com/yzp0n/ncdn/popcache/rfc9111"
 )
 
 var originURLStr = flag.String("originURL", "http://localhost:8888", "Origin server URL")
@@ -30,6 +33,8 @@ func main() {
 	mux := http.NewServeMux()
 	rps := httprps.NewMiddleware(mux)
 	http.Handle("/", rps)
+
+	cacheStore := rfc9111.NewCacheStore()
 
 	mux.HandleFunc("/statusz", func(w http.ResponseWriter, r *http.Request) {
 		s := types.PoPStatus{
@@ -53,13 +58,72 @@ func main() {
 		// return 204
 		w.WriteHeader(http.StatusNoContent)
 	})
-	mux.Handle("/", &httputil.ReverseProxy{
-		// FIXME: actually cache stuff...
-		Rewrite: func(r *httputil.ProxyRequest) {
-			r.SetXForwarded()
-			r.Out.Header.Set("X-NCDN-PoPCache-NodeId", *nodeId)
-			r.SetURL(originURL)
-		},
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Handle non-GET requests with reverse proxy
+		if r.Method != http.MethodGet {
+			proxy := httputil.ReverseProxy{
+				Rewrite: func(rp *httputil.ProxyRequest) {
+					rp.SetXForwarded()
+					rp.Out.Header.Set("X-NCDN-PoPCache-NodeId", *nodeId)
+					rp.SetURL(originURL)
+				},
+			}
+			proxy.ServeHTTP(w, r)
+			return
+		}
+
+		key := r.URL.String()
+
+		if cachedResp, ok := cacheStore.Get(key); ok {
+			for k, vals := range cachedResp.Header {
+				for _, v := range vals {
+					w.Header().Add(k, v)
+				}
+			}
+			w.WriteHeader(cachedResp.StatusCode)
+			_, _ = w.Write(cachedResp.Body)
+			return
+		}
+
+		req := r.Clone(r.Context())
+		req.RequestURI = ""
+		req.URL.Scheme = originURL.Scheme
+		req.URL.Host = originURL.Host
+		req.URL.Path = r.URL.Path
+		req.URL.RawQuery = r.URL.RawQuery
+		req.Host = originURL.Host
+
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			http.Error(w, "Origin fetch failed", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			http.Error(w, "Failed to read response body", http.StatusInternalServerError)
+			return
+		}
+
+		for k, vals := range resp.Header {
+			for _, v := range vals {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(body)
+
+		if rfc9111.IsCacheable(resp) {
+			cached := &rfc9111.CachedResponse{
+				StatusCode: resp.StatusCode,
+				Header:     resp.Header.Clone(),
+				Body:       body,
+				StoredAt:   time.Now(),
+			}
+			cacheStore.Set(key, cached)
+		}
 	})
 
 	log.Printf("Listening on %s...", *listenAddr)
