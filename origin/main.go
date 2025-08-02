@@ -2,12 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"html/template"
 	"log"
 	"net/http"
-	"encoding/json"
 
 	"github.com/yzp0n/ncdn/httprps"
 )
@@ -16,12 +16,12 @@ var nodeId = flag.String("nodeId", "unknown_node", "Name of the node")
 var listenAddr = flag.String("listenAddr", ":8888", "Address to listen on")
 
 type requestInfo struct {
-		RemoteAddr string
-		PopCacheId string
-		OriginId   string
-	}
+	RemoteAddr string
+	PopCacheId string
+	OriginId   string
+}
 
-func dumpRequestInfo(r *http.Request) (requestInfo) {
+func dumpRequestInfo(r *http.Request) requestInfo {
 	return requestInfo{
 		RemoteAddr: r.RemoteAddr,
 		PopCacheId: r.Header.Get("X-NCDN-PoPCache-NodeId"),
@@ -32,17 +32,18 @@ func dumpRequestInfo(r *http.Request) (requestInfo) {
 func serveIndexHTMLInternal(w http.ResponseWriter, r *http.Request) error {
 	tmpl, err := template.New("index.html.gotmpl").ParseFiles("./templates/index.html.gotmpl")
 	if err != nil {
-		return fmt.Errorf("Failed to parse index.html template: %w", err)
+		return fmt.Errorf("failed to parse index.html template: %w", err)
 	}
 
 	ri := dumpRequestInfo(r)
 
 	var buf bytes.Buffer
 	if err = tmpl.Execute(&buf, &ri); err != nil {
-		return fmt.Errorf("Failed to execute index.html template: %w", err)
+		return fmt.Errorf("failed to execute index.html template: %w", err)
 	}
 
 	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Cache-Control", "max-age=60, public")
 	_, err = w.Write(buf.Bytes())
 	if err != nil {
 		log.Printf("Failed to write response: %v", err)
@@ -63,7 +64,7 @@ func serveJsonInternal(w http.ResponseWriter, r *http.Request) error {
 	ri := dumpRequestInfo(r)
 
 	bs, err := json.MarshalIndent(ri, "", "  ")
-	if err!=nil {
+	if err != nil {
 		return err
 	}
 
@@ -83,7 +84,6 @@ func serveJson(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
-
 
 func main() {
 	flag.Parse()
