@@ -22,7 +22,6 @@ var (
 	nodeID       = flag.String("nodeId", "unknown_node", "Name of the node")
 )
 
-// Server represents the PoP cache server
 type Server struct {
 	originURL  *url.URL
 	cacheStore *cache.CacheStore
@@ -31,7 +30,6 @@ type Server struct {
 	nodeID     string
 }
 
-// NewServer creates a new PoP cache server
 func NewServer(originURL *url.URL, nodeID string) *Server {
 	mux := http.NewServeMux()
 	rps := httprps.NewMiddleware(mux)
@@ -50,14 +48,12 @@ func NewServer(originURL *url.URL, nodeID string) *Server {
 	return server
 }
 
-// setupRoutes configures all the HTTP routes for the server
 func (s *Server) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/statusz", s.handleStatus)
 	mux.HandleFunc("/latencyz", s.handleLatency)
 	mux.HandleFunc("/", s.handleRequest)
 }
 
-// handleStatus returns the current status of the PoP server
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := types.PoPStatus{
 		Id:     s.nodeID,
@@ -77,12 +73,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Write(bs)
 }
 
-// handleLatency returns a 204 No Content response for latency checks
 func (s *Server) handleLatency(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleRequest handles all incoming requests with caching logic
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.proxyToOrigin(w, r)
@@ -96,7 +90,6 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	s.fetchAndCache(w, r)
 }
 
-// proxyToOrigin forwards non-GET requests to the origin server
 func (s *Server) proxyToOrigin(w http.ResponseWriter, r *http.Request) {
 	proxy := httputil.ReverseProxy{
 		Rewrite: func(rp *httputil.ProxyRequest) {
@@ -108,7 +101,6 @@ func (s *Server) proxyToOrigin(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
-// serveCachedResponse attempts to serve a cached response if available and fresh
 func (s *Server) serveCachedResponse(w http.ResponseWriter, r *http.Request) bool {
 	key := r.URL.String()
 
@@ -122,6 +114,8 @@ func (s *Server) serveCachedResponse(w http.ResponseWriter, r *http.Request) boo
 	if !hasMaxAge {
 		return false
 	}
+
+	log.Printf("Serving cached response for %s", key)
 
 	maxAgeInt, err := strconv.Atoi(maxAge)
 	if err != nil {
@@ -137,7 +131,6 @@ func (s *Server) serveCachedResponse(w http.ResponseWriter, r *http.Request) boo
 	return true
 }
 
-// writeCachedResponse writes a cached response to the ResponseWriter
 func (s *Server) writeCachedResponse(w http.ResponseWriter, cachedResp *cache.CachedResponse) {
 	for k, vals := range cachedResp.Header {
 		for _, v := range vals {
@@ -148,7 +141,6 @@ func (s *Server) writeCachedResponse(w http.ResponseWriter, cachedResp *cache.Ca
 	w.Write(cachedResp.Body)
 }
 
-// fetchAndCache fetches a response from origin and caches it if cacheable
 func (s *Server) fetchAndCache(w http.ResponseWriter, r *http.Request) {
 	req := s.buildOriginRequest(r)
 
@@ -180,7 +172,6 @@ func (s *Server) fetchAndCache(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// buildOriginRequest creates a request to the origin server
 func (s *Server) buildOriginRequest(r *http.Request) *http.Request {
 	req := r.Clone(r.Context())
 	req.RequestURI = ""
@@ -192,7 +183,6 @@ func (s *Server) buildOriginRequest(r *http.Request) *http.Request {
 	return req
 }
 
-// cacheResponse stores a response in the cache
 func (s *Server) cacheResponse(key string, resp *http.Response, body []byte) {
 	cached := &cache.CachedResponse{
 		StatusCode: resp.StatusCode,
