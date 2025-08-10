@@ -1,197 +1,29 @@
 package main
 
 import (
-	"encoding/json"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"flag"
-	"io"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
-	"strconv"
 	"time"
 
-	"github.com/yzp0n/ncdn/httprps"
-	"github.com/yzp0n/ncdn/popcache/cache"
-	"github.com/yzp0n/ncdn/types"
+	"github.com/kota-yata/kyache"
+	"github.com/quic-go/quic-go/http3"
 )
 
 var (
-	originURLStr = flag.String("originURL", "http://localhost:8888", "Origin server URL")
+	originURLStr = flag.String("originURL", "http://localhost:8000", "Origin server URL")
 	listenAddr   = flag.String("listenAddr", ":8889", "Address to listen on")
-	nodeID       = flag.String("nodeId", "unknown_node", "Name of the node")
+	nodeID       = flag.String("nodeId", "unknown_node", "Name of the node") // Not Used
+	enableHTTP3  = flag.Bool("http3", false, "Enable HTTP/3 support")
 )
-
-type Server struct {
-	originURL  *url.URL
-	cacheStore *cache.CacheStore
-	rps        *httprps.Middleware
-	startTime  time.Time
-	nodeID     string
-}
-
-func NewServer(originURL *url.URL, nodeID string) *Server {
-	mux := http.NewServeMux()
-	rps := httprps.NewMiddleware(mux)
-
-	server := &Server{
-		originURL:  originURL,
-		cacheStore: cache.NewCacheStore(),
-		rps:        rps,
-		startTime:  time.Now(),
-		nodeID:     nodeID,
-	}
-
-	server.setupRoutes(mux)
-	http.Handle("/", rps)
-
-	return server
-}
-
-func (s *Server) setupRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/statusz", s.handleStatus)
-	mux.HandleFunc("/latencyz", s.handleLatency)
-	mux.HandleFunc("/", s.handleRequest)
-}
-
-func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	status := types.PoPStatus{
-		Id:     s.nodeID,
-		Uptime: time.Since(s.startTime).Seconds(),
-		Load:   s.rps.GetRPS(),
-	}
-
-	bs, err := json.MarshalIndent(status, "", "  ")
-	if err != nil {
-		log.Printf("Failed to marshal PoP status: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(bs)
-}
-
-func (s *Server) handleLatency(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		s.proxyToOrigin(w, r)
-		return
-	}
-
-	if s.serveCachedResponse(w, r) {
-		return
-	}
-
-	s.fetchAndCache(w, r)
-}
-
-func (s *Server) proxyToOrigin(w http.ResponseWriter, r *http.Request) {
-	proxy := httputil.ReverseProxy{
-		Rewrite: func(rp *httputil.ProxyRequest) {
-			rp.SetXForwarded()
-			rp.Out.Header.Set("X-NCDN-PoPCache-NodeId", s.nodeID)
-			rp.SetURL(s.originURL)
-		},
-	}
-	proxy.ServeHTTP(w, r)
-}
-
-func (s *Server) serveCachedResponse(w http.ResponseWriter, r *http.Request) bool {
-	key := r.URL.String()
-
-	cachedResp, exists := s.cacheStore.Get(key)
-	if !exists {
-		return false
-	}
-
-	headerStruct := cache.NewParsedHeaders(cachedResp.Header)
-	maxAge, hasMaxAge := headerStruct.GetDirective("Cache-Control", "max-age")
-	if !hasMaxAge {
-		return false
-	}
-
-	log.Printf("Serving cached response for %s", key)
-
-	maxAgeInt, err := strconv.Atoi(maxAge)
-	if err != nil {
-		log.Printf("Invalid max-age value %q for key %q: %v", maxAge, key, err)
-		return false
-	}
-
-	if !cache.IsFresh(cachedResp.StoredAt, maxAgeInt) {
-		return false
-	}
-
-	s.writeCachedResponse(w, cachedResp)
-	return true
-}
-
-func (s *Server) writeCachedResponse(w http.ResponseWriter, cachedResp *cache.CachedResponse) {
-	for k, vals := range cachedResp.Header {
-		for _, v := range vals {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(cachedResp.StatusCode)
-	w.Write(cachedResp.Body)
-}
-
-func (s *Server) fetchAndCache(w http.ResponseWriter, r *http.Request) {
-	req := s.buildOriginRequest(r)
-
-	resp, err := http.DefaultTransport.RoundTrip(req)
-	if err != nil {
-		log.Printf("Origin fetch failed for %s: %v", req.URL.String(), err)
-		http.Error(w, "Origin fetch failed", http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Failed to read response body for %s: %v", req.URL.String(), err)
-		http.Error(w, "Failed to read response body", http.StatusInternalServerError)
-		return
-	}
-
-	for k, vals := range resp.Header {
-		for _, v := range vals {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
-
-	if cache.IsCacheable(resp) {
-		s.cacheResponse(r.URL.String(), resp, body)
-	}
-}
-
-func (s *Server) buildOriginRequest(r *http.Request) *http.Request {
-	req := r.Clone(r.Context())
-	req.RequestURI = ""
-	req.URL.Scheme = s.originURL.Scheme
-	req.URL.Host = s.originURL.Host
-	req.URL.Path = r.URL.Path
-	req.URL.RawQuery = r.URL.RawQuery
-	req.Host = s.originURL.Host
-	return req
-}
-
-func (s *Server) cacheResponse(key string, resp *http.Response, body []byte) {
-	cached := &cache.CachedResponse{
-		StatusCode: resp.StatusCode,
-		Header:     resp.Header.Clone(),
-		Body:       body,
-		StoredAt:   time.Now(),
-	}
-	s.cacheStore.Set(key, cached)
-}
 
 func main() {
 	flag.Parse()
@@ -201,10 +33,68 @@ func main() {
 		log.Fatalf("Failed to parse origin URL %q: %v", *originURLStr, err)
 	}
 
-	_ = NewServer(originURL, *nodeID)
-
-	log.Printf("Starting PoP cache server on %s, proxying to %s", *listenAddr, *originURLStr)
-	if err := http.ListenAndServe(*listenAddr, nil); err != nil {
-		log.Fatalf("Server failed to start: %v", err)
+	config := &kyache.Config{
+		EnableHTTP3: *enableHTTP3,
 	}
+
+	if *enableHTTP3 {
+		config.TLSConfig = &tls.Config{
+			InsecureSkipVerify: true,
+		}
+	}
+
+	cache := kyache.New(config)
+	handler := cache.Handler(originURL)
+
+	if *enableHTTP3 {
+		server := &http3.Server{
+			Addr:    *listenAddr,
+			Handler: handler,
+			TLSConfig: &tls.Config{
+				Certificates: generateSelfSignedCert(),
+			},
+		}
+		log.Printf("Starting HTTP/3 cache server on %s, proxying to %s", *listenAddr, *originURLStr)
+		if err := server.ListenAndServe(); err != nil {
+			log.Fatalf("HTTP/3 server failed to start: %v", err)
+		}
+	} else {
+		log.Printf("Starting cache server on %s, proxying to %s", *listenAddr, *originURLStr)
+		if err := http.ListenAndServe(*listenAddr, handler); err != nil {
+			log.Fatalf("Server failed to start: %v", err)
+		}
+	}
+}
+
+func generateSelfSignedCert() []tls.Certificate {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		log.Fatalf("Failed to generate private key: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Test"},
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		DNSNames:              []string{"localhost"},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		log.Fatalf("Failed to create certificate: %v", err)
+	}
+
+	cert := tls.Certificate{
+		Certificate: [][]byte{certDER},
+		PrivateKey:  key,
+	}
+
+	return []tls.Certificate{cert}
 }
