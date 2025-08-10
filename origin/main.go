@@ -2,18 +2,24 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"html/template"
 	"log"
 	"net/http"
+	"sync"
 
+	"github.com/quic-go/quic-go/http3"
 	"github.com/yzp0n/ncdn/httprps"
 )
 
 var nodeId = flag.String("nodeId", "unknown_node", "Name of the node")
 var listenAddr = flag.String("listenAddr", ":8888", "Address to listen on")
+var certFile = flag.String("cert", "../secrets/certificate.pem", "TLS certificate file (required for HTTP/3)")
+var keyFile = flag.String("key", "../secrets/certificate.key", "TLS private key file (required for HTTP/3)")
 
 type requestInfo struct {
 	RemoteAddr string
@@ -95,7 +101,6 @@ func main() {
 	mux.HandleFunc("/json", serveJson)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
-			// redirect to index.html
 			http.Redirect(w, r, "/index.html", http.StatusPermanentRedirect)
 			return
 		}
@@ -109,9 +114,69 @@ func main() {
 		fmt.Fprintf(w, "RPS: %.2f\n", rps.GetRPS())
 	})
 
-	log.Printf("Listening on %s...\n", *listenAddr)
-	err := http.ListenAndServe(*listenAddr, nil)
-	if err != nil {
-		log.Fatal(err)
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// wg.Add(1)
+	// go func() {
+	// 	defer wg.Done()
+	// 	log.Printf("Starting HTTP/1.1 and HTTP/2 server on %s...\n", *listenAddr)
+
+	// 	err := http.ListenAndServe(*listenAddr, nil)
+
+	// 	if err != nil {
+	// 		log.Printf("HTTP/1.1 and HTTP/2 server error: %v", err)
+	// 		cancel()
+	// 	}
+	// }()
+
+	if *certFile != "" && *keyFile != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Printf("Starting HTTP/3 server on %s...\n", *listenAddr)
+
+			cert, err := tls.LoadX509KeyPair(*certFile, *keyFile)
+			if err != nil {
+				log.Printf("Failed to load TLS certificate: %v", err)
+				cancel()
+				return
+			}
+
+			tlsConfig := &tls.Config{
+				Certificates: []tls.Certificate{cert},
+			}
+
+			server := &http3.Server{
+				Addr:      *listenAddr,
+				Handler:   nil, // use default handler
+				TLSConfig: tlsConfig,
+			}
+
+			server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/index.html":
+					log.Printf("Serving index.html for %s", r.RemoteAddr)
+					serveIndexHTMLInternal(w, r)
+				case "/json":
+					serveJsonInternal(w, r)
+				default:
+					fs.ServeHTTP(w, r)
+				}
+			})
+
+			err = server.ListenAndServe()
+			if err != nil {
+				log.Printf("HTTP/3 server error: %v", err)
+				cancel()
+			}
+		}()
+	} else {
+		log.Printf("TLS certificates not provided (-cert and -key flags), HTTP/3 server disabled")
 	}
+
+	<-ctx.Done()
+	log.Printf("Shutting down servers...")
+	wg.Wait()
 }
