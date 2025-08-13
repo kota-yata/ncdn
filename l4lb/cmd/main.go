@@ -18,8 +18,8 @@ import (
 
 var lbBin = flag.String("lbBin", "c/lb.o", "Path to XDP lb binary")
 var xdpcapHookPath = flag.String("xdpcapHookPath", "/sys/fs/bpf/xdpcap_hook", "Path to XDPCap hook")
-var xdpif = flag.String("interface", "net0", "Interface to attach lb prog to")
-var vip = flag.String("vip", "192.0.2.10", "VIP address to load balance")
+var xdpif = flag.String("interface", "enp4s0", "Interface to attach lb prog to")
+var vip = flag.String("vip", "219.100.95.50", "VIP address to load balance")
 var deststr = flag.String("dests", "", "Comma separated list of destination IP and MAC addresses. (Example: 192.168.88.10;00:00:5e:00:53:01,)")
 
 func parseDest(deststr string) ([]l4lbdrv.DestinationEntry, error) {

@@ -13,17 +13,19 @@ set +x
 
 cd ${SRC_DIR}/l4lb
 
-dests=""
+# dests=""
 
+# # for ns in LB C0 C1; do
 # for ns in LB C0 C1; do
-for ns in LB C0 C1; do
-    ip4=$(sudo ip netns exec ${ns} ip -json -f inet a show net0 | jq '.[].addr_info[].local' -r)
-    mac=$(sudo ip netns exec ${ns} cat /sys/class/net/net0/address)
+#     ip4=$(sudo ip netns exec ${ns} ip -json -f inet a show net0 | jq '.[].addr_info[].local' -r)
+#     mac=$(sudo ip netns exec ${ns} cat /sys/class/net/net0/address)
 
-    dests="${dests}${ip4};${mac},"
-done
+#     dests="${dests}${ip4};${mac},"
+# done
 
-echo ${dests}
+# echo ${dests}
 
-sudo ip -n LB tunn del ipip0 || echo "no ipip0. good" # in case it exists from a `nolb.sh` run
-sudo ip netns exec LB ${BIN_DIR}/l4lb -xdpcapHookPath="" -dests="${dests}"
+# sudo ip -n LB tunn del ipip0 || echo "no ipip0. good" # in case it exists from a `nolb.sh` run
+# sudo ip netns exec LB ${BIN_DIR}/l4lb -xdpcapHookPath="" -dests="${dests}"
+
+sudo ${BIN_DIR}/l4lb -xdpcapHookPath="" -dests="192.168.20.2;f4:6b:8c:8a:ea:7d,192.168.20.101;d8:3a:dd:06:a3:2f"

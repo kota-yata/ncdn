@@ -25,6 +25,10 @@ type StatCounters struct { // ../c/lb.c:28
 	NoVipMatchTotal              uint64 // ../c/lb.c:36
 	FailedAdjustHeadTotal        uint64 // ../c/lb.c:37
 	FailedAdjustTailTotal        uint64 // ../c/lb.c:38
+	QuicPacketTotal              uint64 // ../c/lb.c:39
+	QuicLongHeaderTotal          uint64 // ../c/lb.c:40
+	QuicShortHeaderTotal         uint64 // ../c/lb.c:41
+	InvalidQuicPacketTotal       uint64 // ../c/lb.c:42
 }
 
 func StatCountersAssertLayout(s *DWARFStruct) error {
@@ -86,7 +90,26 @@ func StatCountersAssertLayout(s *DWARFStruct) error {
 	if goff != uintptr(doff) {
 		return fmt.Errorf("offset mismatch: go FailedAdjustTailTotal: %d, dwarf failed_adjust_tail_total: %d", goff, doff)
 	}
-
+	goff = unsafe.Offsetof(StatCounters{}.QuicPacketTotal)
+	doff = fs["quic_packet_total"].Offset
+	if goff != uintptr(doff) {
+		return fmt.Errorf("offset mismatch: go QuicPacketTotal: %d, dwarf quic_packet_total: %d", goff, doff)
+	}
+	goff = unsafe.Offsetof(StatCounters{}.QuicLongHeaderTotal)
+	doff = fs["quic_long_header_total"].Offset
+	if goff != uintptr(doff) {
+		return fmt.Errorf("offset mismatch: go QuicLongHeaderTotal: %d, dwarf quic_long_header_total: %d", goff, doff)
+	}
+	goff = unsafe.Offsetof(StatCounters{}.QuicShortHeaderTotal)
+	doff = fs["quic_short_header_total"].Offset
+	if goff != uintptr(doff) {
+		return fmt.Errorf("offset mismatch: go QuicShortHeaderTotal: %d, dwarf quic_short_header_total: %d", goff, doff)
+	}
+	goff = unsafe.Offsetof(StatCounters{}.InvalidQuicPacketTotal)
+	doff = fs["invalid_quic_packet_total"].Offset
+	if goff != uintptr(doff) {
+		return fmt.Errorf("offset mismatch: go InvalidQuicPacketTotal: %d, dwarf invalid_quic_packet_total: %d", goff, doff)
+	}
 	return nil
 }
 
