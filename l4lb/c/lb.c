@@ -13,6 +13,7 @@
 #include <sys/types.h>
 
 #include "quic.h"
+#include "pkt.h"
 
 #define PACKED __attribute__((__packed__))
 #define ALIGN8 __attribute__((aligned(8)))
@@ -94,40 +95,6 @@ struct {
   } while (0)
 #endif
 
-// Helper function to validate and analyze QUIC packets
-static inline bool is_valid_quic_packet(uint8_t* quic_data, void* data_end, 
-                                        struct stat_counters* c) {
-  if (quic_data >= (uint8_t*)data_end) {
-    return false;
-  }
-  
-  uint8_t first_byte = *quic_data;
-  
-  // Check fixed bit (must be 1 for valid QUIC packets)
-  if ((first_byte & 0x40) == 0) {
-    ++c->invalid_quic_packet_total;
-    return false;
-  }
-  
-  // Additional validation for long header packets
-  if (QUIC_IS_LONG_HEADER(first_byte)) {
-    // Need at least 5 bytes for basic long header (flags + version)
-    if (quic_data + 5 > (uint8_t*)data_end) {
-      ++c->invalid_quic_packet_total;
-      return false;
-    }
-    
-    // Check version (should not be 0 for valid packets, except version negotiation)
-    uint32_t version = *(uint32_t*)(quic_data + 1);
-    if (version == 0) {
-      // This might be a version negotiation packet, still valid
-      debugk("QUIC version negotiation packet detected");
-    }
-  }
-  
-  return true;
-}
-
 SEC("xdp")
 int lb_main(struct xdp_md* ctx) {
   void* data = (void*)(uint64_t)ctx->data;
@@ -191,15 +158,13 @@ int lb_main(struct xdp_md* ctx) {
   ++c->rx_packet_total;
   c->rx_total_size += data_end - data;
 
-  uint16_t src_port = 0;
-  uint16_t dst_port = 0;
-  bool is_quic = false;
-  struct quic_header* quic_hdr = NULL;
+  pkt_t pkt;
+  lb_init(&pkt);
   
   if (ip->protocol == IPPROTO_TCP) {
     struct tcphdr* tcp = (struct tcphdr*)(ip + 1);
-    src_port = ntohs(tcp->source);
-    dst_port = ntohs(tcp->dest);
+    lb_set_tuple4(&pkt, ntohl(ip->saddr), ntohl(ip->daddr), ntohs(tcp->source), ntohs(tcp->dest));
+    lb_mark_tcp(&pkt);
   } else if (ip->protocol == IPPROTO_UDP) {
     if (data + sizeof(struct ethhdr) + sizeof(struct iphdr) + 
         sizeof(struct udphdr) > data_end) {
@@ -208,15 +173,13 @@ int lb_main(struct xdp_md* ctx) {
     }
     
     struct udphdr* udp = (struct udphdr*)(ip + 1);
-    src_port = ntohs(udp->source);
-    dst_port = ntohs(udp->dest);
-
-    quic_hdr = (struct quic_header*)(udp + 1);
+    lb_set_tuple4(&pkt, ntohl(ip->saddr), ntohl(ip->daddr), ntohs(udp->source), ntohs(udp->dest));
+    lb_mark_udp(&pkt);
 
     // Check if this might be a QUIC packet
     // QUIC typically uses port 443 or other high ports
-    if (dst_port == 443 || dst_port == 80 || src_port == 443 || src_port == 80 || 
-        dst_port >= 1024) {
+    if (pkt.t4.dst_port == 443 || pkt.t4.dst_port == 80 || pkt.t4.src_port == 443 || pkt.t4.src_port == 80 || 
+        pkt.t4.dst_port >= 1024) {
       // Check if we have enough data for QUIC header
       if (data + sizeof(struct ethhdr) + sizeof(struct iphdr) + 
           sizeof(struct udphdr) + 1 <= data_end) {
@@ -225,15 +188,16 @@ int lb_main(struct xdp_md* ctx) {
         
         // Validate format
         if (is_valid_quic_packet(quic_payload, data_end, c)) {
-          is_quic = true;
           ++c->quic_packet_total;
           
           uint8_t first_byte = *quic_payload;
           if (QUIC_IS_LONG_HEADER(first_byte)) {
+            lb_quic_fill_long_from_udp_payload(&pkt, quic_payload, data_end - quic_payload);
             ++c->quic_long_header_total;
             debugk("QUIC long header packet detected: type=%u", 
                    QUIC_GET_PACKET_TYPE(first_byte));
           } else {
+            lb_quic_fill_short_from_udp_payload(&pkt, quic_payload, data_end - quic_payload, 0);
             ++c->quic_short_header_total;
             debugk("QUIC short header packet detected");
           }
@@ -243,9 +207,20 @@ int lb_main(struct xdp_md* ctx) {
   }
   
   uint32_t key = ip->saddr + src_port;
-  if (is_quic) {
-    debugk("incoming QUIC packet: ip=%pI4 src_port=%u dst_port=%u dest_cid=%u", 
-           &ip->saddr, src_port, dst_port, quic_hdr->long_hdr.dcid[0]);
+  uint16_t src_port = ntohs(pkt.t4.src_port);
+  uint16_t dst_port = ntohs(pkt.t4.dst_port);
+  if (pkt.app == APP_QUIC) {
+    debugk("incoming QUIC packet: ip=%pI4 port=%u protocol=%u, dcid_len=%zu, dcid_first_octet=0x%02x",
+           &ip->saddr, src_port, ip->protocol, pkt.quic.dcid_len, pkt.quic.dcid_first_octet);
+    if (pkt.quic.hdr_form == QUIC_HDR_LONG) {
+      debugk("QUIC long header: flags=0x%02x, version=0x%08x, dcid_len=%zu",
+             pkt.quic.dcid_first_octet, 
+             *(uint32_t*)(quic_payload + 1), pkt.quic.dcid_len);
+    } else if (pkt.quic.hdr_form == QUIC_HDR_SHORT) {
+      debugk("QUIC short header: flags=0x%02x, dcid_len=%zu, dcid_first_octet=0x%02x",
+             pkt.quic.dcid_first_octet, 
+             pkt.quic.dcid_len, pkt.quic.dcid_first_octet);
+    }
   } else {
     debugk("incoming packet: ip=%pI4 port=%u protocol=%u", 
            &ip->saddr, src_port, ip->protocol);
