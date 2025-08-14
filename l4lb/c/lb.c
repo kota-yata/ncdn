@@ -14,6 +14,7 @@
 
 #include "quic.h"
 #include "pkt.h"
+#include "stat_counters.h"
 
 #define PACKED __attribute__((__packed__))
 #define ALIGN8 __attribute__((aligned(8)))
@@ -25,26 +26,6 @@
 void* memcpy(void*, const void*, unsigned long);
 
 #define DEBUG_LB_MAIN 1
-
-// clang-format off
-struct stat_counters { /* go:Add,String */
-  uint64_t rx_packet_total; // HELP Number of packets received against known VIPs.
-  uint64_t rx_total_size; // HELP Total size of packets received against known VIPs.
-
-  uint64_t too_short_packet_total; // HELP Number of packets dropped due to being too short.
-  uint64_t non_ipv4_packet_total; // HELP Number of packets dropped due to their IP protocol version not v4.
-  uint64_t ip_option_packet_total; // HELP Number of packets dropped due to their IP header having options. (currently not supported)
-  uint64_t non_supported_proto_packet_total; // HELP Number of packets dropped due to their protocol not being TCP.
-  uint64_t no_vip_match_total; // HELP Number of packets dropped due to their dest IP address not matching any known VIP.
-  uint64_t failed_adjust_head_total; // HELP Number of xdp_adjust_head failures.
-  uint64_t failed_adjust_tail_total; // HELP Number of xdp_adjust_tail failures.
-  
-  uint64_t quic_packet_total; // HELP Number of QUIC packets detected.
-  uint64_t quic_long_header_total; // HELP Number of QUIC long header packets detected.
-  uint64_t quic_short_header_total; // HELP Number of QUIC short header packets detected.
-  uint64_t invalid_quic_packet_total; // HELP Number of invalid QUIC packets detected.
-} ALIGN8;
-// clang-format on
 
 struct {
   __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -86,14 +67,6 @@ struct {
   __type(key, uint32_t);
   __type(value, struct destination_entry);
 } destinations_map SEC(".maps");
-
-#if DEBUG_LB_MAIN
-#define debugk(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)
-#else
-#define debugk(fmt, ...) \
-  do {                   \
-  } while (0)
-#endif
 
 SEC("xdp")
 int lb_main(struct xdp_md* ctx) {
@@ -181,23 +154,21 @@ int lb_main(struct xdp_md* ctx) {
     if (pkt.t4.dst_port == 443 || pkt.t4.dst_port == 80 || pkt.t4.src_port == 443 || pkt.t4.src_port == 80 || 
         pkt.t4.dst_port >= 1024) {
       // Check if we have enough data for QUIC header
-      if (data + sizeof(struct ethhdr) + sizeof(struct iphdr) + 
-          sizeof(struct udphdr) + 1 <= data_end) {
-        
-        uint8_t* quic_payload = (uint8_t*)(udp + 1);
+      if (data + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr) + 1 <= data_end) {
+        void* udp_payload = (void*)(udp + 1);
         
         // Validate format
-        if (is_valid_quic_packet(quic_payload, data_end, c)) {
+        if (is_valid_quic_packet(udp_payload, data_end, c)) {
           ++c->quic_packet_total;
-          
-          uint8_t first_byte = *quic_payload;
-          if (QUIC_IS_LONG_HEADER(first_byte)) {
-            lb_quic_fill_long_from_udp_payload(&pkt, quic_payload, data_end - quic_payload);
+
+          void* first_byte = udp_payload;
+          if (QUIC_IS_LONG_HEADER(*(uint8_t*)first_byte)) {
+            lb_quic_fill_long_from_udp_payload(&pkt, udp_payload, data_end - udp_payload);
             ++c->quic_long_header_total;
             debugk("QUIC long header packet detected: type=%u", 
-                   QUIC_GET_PACKET_TYPE(first_byte));
+                   QUIC_GET_PACKET_TYPE(*(uint8_t*)first_byte));
           } else {
-            lb_quic_fill_short_from_udp_payload(&pkt, quic_payload, data_end - quic_payload, 0);
+            lb_quic_fill_short_from_udp_payload(&pkt, udp_payload, data_end - udp_payload, 0);
             ++c->quic_short_header_total;
             debugk("QUIC short header packet detected");
           }
@@ -205,25 +176,27 @@ int lb_main(struct xdp_md* ctx) {
       }
     }
   }
-  
-  uint32_t key = ip->saddr + src_port;
-  uint16_t src_port = ntohs(pkt.t4.src_port);
-  uint16_t dst_port = ntohs(pkt.t4.dst_port);
+
+  uint32_t key = 0;
+  key = (pkt.t4.src_ip ^ pkt.t4.dst_ip) ^ (pkt.t4.src_port ^ pkt.t4.dst_port);
+  // if (pkt.l4 == L4_TCP || pkt.app != APP_QUIC) {
+  //   key = (pkt.t4.src_ip ^ pkt.t4.dst_ip) ^ (pkt.t4.src_port ^ pkt.t4.dst_port);
+  // } else {
+  //   key = pkt.backend_id ^ (pkt.quic.dcid_first_octet << 8);
+  // }
   if (pkt.app == APP_QUIC) {
-    debugk("incoming QUIC packet: ip=%pI4 port=%u protocol=%u, dcid_len=%zu, dcid_first_octet=0x%02x",
-           &ip->saddr, src_port, ip->protocol, pkt.quic.dcid_len, pkt.quic.dcid_first_octet);
+    // debugk("incoming QUIC packet: ip=%pI4 dcid_len=%zu",
+    //        &ip->saddr, pkt.quic.dcid_len);
     if (pkt.quic.hdr_form == QUIC_HDR_LONG) {
-      debugk("QUIC long header: flags=0x%02x, version=0x%08x, dcid_len=%zu",
-             pkt.quic.dcid_first_octet, 
-             *(uint32_t*)(quic_payload + 1), pkt.quic.dcid_len);
+      // debugk("QUIC long header: flags=0x%02x", pkt.quic.dcid_first_octet);
     } else if (pkt.quic.hdr_form == QUIC_HDR_SHORT) {
-      debugk("QUIC short header: flags=0x%02x, dcid_len=%zu, dcid_first_octet=0x%02x",
-             pkt.quic.dcid_first_octet, 
-             pkt.quic.dcid_len, pkt.quic.dcid_first_octet);
+      // debugk("QUIC short header: flags=0x%02x, dcid_len=%zu, dcid_first_octet=0x%02x",
+      //        pkt.quic.dcid_first_octet, 
+      //        pkt.quic.dcid_len, pkt.quic.dcid_first_octet);
     }
   } else {
     debugk("incoming packet: ip=%pI4 port=%u protocol=%u", 
-           &ip->saddr, src_port, ip->protocol);
+           &ip->saddr, pkt.t4.src_port, ip->protocol);
   }
 
   uint32_t dest_idx = (key % config->num_dests) + 1;
