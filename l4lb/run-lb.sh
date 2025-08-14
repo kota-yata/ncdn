@@ -28,4 +28,4 @@ cd ${SRC_DIR}/l4lb
 # sudo ip -n LB tunn del ipip0 || echo "no ipip0. good" # in case it exists from a `nolb.sh` run
 # sudo ip netns exec LB ${BIN_DIR}/l4lb -xdpcapHookPath="" -dests="${dests}"
 
-sudo ${BIN_DIR}/l4lb -xdpcapHookPath="" -dests="192.168.20.2;f4:6b:8c:8a:ea:7d,192.168.20.101;d8:3a:dd:06:a3:2f"
+sudo ${BIN_DIR}/l4lb -xdpcapHookPath="" -dests="192.168.20.107;f4:6b:8c:8a:ea:7d,192.168.20.108;58:47:ca:77:d1:ad,192.168.20.101;d8:3a:dd:06:a3:2f"
