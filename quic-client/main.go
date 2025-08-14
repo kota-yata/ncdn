@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	url = flag.String("url", "https://192.0.2.10:8889/", "URL to request")
+	url = flag.String("url", "https://kcdn.kota-yata.com:4443/", "URL to request")
 )
 
 func main() {
